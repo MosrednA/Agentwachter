@@ -99,6 +99,22 @@ python ~/.agents/skills/agent-messaging/agent_msg.py start --to claude --cwd "C:
 - **When it falls back.** For a folder that isn't a Codex project yet, or one Claude Code doesn't trust yet, `start`
   opens the app's new-thread deep link instead. The prompt is filled in there, and the user confirms the folder once
   and sends it. `--open` does that on purpose, when the user should read the prompt first.
+- **`--trust`: trust a new folder up front.** Use it only when the user asked for it, because it changes a security
+  setting. It trusts the folder in that app the way clicking its "Trust" button would. Then it starts the thread in
+  the background as above, so nobody has to click anything:
+  - **Claude Code:** sets `projects["C:/path"].hasTrustDialogAccepted` in `~/.claude.json`. It writes under Claude
+    Code's own lock (`~/.claude.json.lock`), so writes from running sessions are kept. Claude counts a trusted folder
+    above only up to the git root, so a new repo under a trusted `C:\Projects` gets its own entry.
+  - **Codex:** sets `projects.'c:\path'.trust_level = "trusted"` in `~/.codex/config.toml`. Codex writes it itself
+    (`config/batchWrite` through the private app-server, the same edit its app makes). The folder does not become a
+    project in the app's sidebar. The user adds it there when they want, and the app then doesn't ask.
+
+  It writes nothing when the folder is already trusted. It refuses a drive, the home folder or anything above it, and
+  any folder the user marked untrusted in Codex. `~/.agents/inbox/log.jsonl` records what it trusted.
+
+  Without trust, a `claude --bg` session still runs and still gets the bridge's hooks, and a background Codex thread
+  still runs. But Claude skips the project's own hooks and MCP servers, and both apps ask once the user opens the
+  folder there.
 
 The new thread gets the same header and reply line as a sent message, so it treats the message as a colleague's
 request and can report back. `sent` lists it as "to new codex/claude".

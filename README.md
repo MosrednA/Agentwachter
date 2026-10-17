@@ -75,7 +75,7 @@ You don't run it yourself. Tell an agent "ask Codex to…", "let Claude know…"
 |---|---|
 | `list [--cwd DIR]` | The live Claude Code sessions and recent Codex threads, per folder. |
 | `send --to codex\|claude [--thread ID] (--message … \| --message-file F \| --message -) [--await-reply]` | Puts a message straight into the thread that's working in that folder, with a header saying who sent it and a ready-made reply command. |
-| `start --to codex\|claude --cwd DIR --message … [--name N] [--open]` | Starts a **new** thread in the background, with that message as its first prompt. |
+| `start --to codex\|claude --cwd DIR --message … [--name N] [--open] [--trust]` | Starts a **new** thread in the background, with that message as its first prompt. `--trust` first trusts a new folder in that app, the way its Trust button does. |
 | `sent [--all]` | What this thread sent, and whether each message is waiting, read, queued or replied to. |
 | `inbox`, `wait` | Read Claude's waiting messages by hand, or block until one arrives. As a background task, `wait` wakes an idle session. |
 | `hook` | The entry point the hooks above call. |
@@ -87,6 +87,12 @@ How delivery works:
 - **A new Codex thread:** a private `codex app-server` creates the thread, names it, and adds a note on where it came from. The queue and wake link then start it in the desktop app.
 - **A new Claude session:** `claude --bg` starts it in the background. Follow it with `claude attach <id>`.
 - **When `start` falls back:** for a folder that isn't a Codex project yet, or that Claude Code doesn't trust yet, it opens the app's new-thread deep link instead. The prompt is filled in there, and you confirm the folder and press send.
+- **With `--trust`:**
+  - **What it writes:** the trust entry in `~/.claude.json` (under Claude Code's own lock) or in `~/.codex/config.toml` (written by Codex itself through the app-server). After that the thread starts in the background.
+  - **What it refuses:** a drive, your home folder, and any folder you marked untrusted in Codex.
+  - **What it doesn't do:** add the folder as a project in the Codex sidebar.
+
+  Agents only use `--trust` when you ask for it.
 
 Every send is logged, without the text, in `~/.agents/inbox/log.jsonl`. That log is what the watcher counts.
 
@@ -172,7 +178,7 @@ The test run took ~23.5 h, with 232.6M tokens and 1461 tool calls.
   | Kev 0.8B, local via Unsloth's `/v1/systemone` | ~2/5 | 3–7 s on CPU |
 
   The plan is to make the judge a URL plus a model in the Jev request format. That means Jev for now, and a local model through Unsloth once a stronger one holds up on the same five moments. The yes/no question "does the owner need to know now?" was useless for every model, so notifications come from the state and how long it lasts.
-- **Trust up front.** `start` will get an opt-in way to trust a new project folder, so neither app asks the first time.
+- **New Codex projects from `start`.** A folder `start` trusted still isn't a project in the Codex sidebar. The app-server's `project/create` didn't reach the running app.
 
 ## Merging into UsageTray
 

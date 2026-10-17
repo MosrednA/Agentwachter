@@ -8,7 +8,7 @@
   agent_msg.py wait   [--session ID] [--hours 8]        block until one arrives (a background task that wakes Claude)
   agent_msg.py hook                                     Claude Code hook: hands waiting messages to the session
   agent_msg.py start  --to codex|claude [--cwd DIR] [--name NAME] (--message TEXT | --message-file FILE | --message -)
-                      [--open]                          a new thread for the folder, started in the background
+                      [--open] [--trust]                a new thread for the folder, started in the background
 
 To Codex: `codex queue --thread <id> --message <text>`, then the wake link codex://threads/wake/<id>, which makes the
 desktop app take it in without raising its window (it only reads the queue for threads it has loaded).
@@ -19,9 +19,12 @@ worktree inside the project).
 A new thread: for Codex, a private `codex app-server` creates and names it and the queue and wake link start it in the
 desktop app; for Claude, `claude --bg`. With --open, or for a folder that isn't a Codex project or that Claude Code
 doesn't trust yet, the app's deep link instead (codex://threads/new?path=&prompt=, claude://code/new?folder=&q=), which
-fills in the prompt for the user to read and send.
+fills in the prompt for the user to read and send. --trust first trusts the folder in that app, as clicking "Trust" in
+it would (Claude: ~/.claude.json, Codex: ~/.codex/config.toml through Codex's own writer), and then starts it in the
+background.
 """
-import argparse, datetime, json, os, pathlib, re, shutil, subprocess, sys, threading, time, urllib.parse, uuid
+import argparse, contextlib, datetime, itertools, json, os, pathlib, re, shutil, subprocess, sys, threading, time, \
+    urllib.parse, uuid
 
 HOME = pathlib.Path.home()
 INBOX = HOME / '.agents' / 'inbox'
@@ -321,6 +324,30 @@ def codex_project(folder):
     return within(folder, roots)
 
 
+def git_root(folder):
+    """The folder's git root (the nearest folder with a .git: a repo's folder, or a worktree's file), or None."""
+    f = pathlib.Path(folder)
+    return next((d for d in [f, *f.parents] if d != pathlib.Path(d.anchor) and (d / '.git').exists()), None)
+
+
+def main_root(root):
+    """For a git worktree, the repo it belongs to (its .git file points into <repo>/.git/worktrees/); else the root."""
+    try:
+        m = re.match(r'gitdir:\s*(.+)', (root / '.git').read_text(encoding='utf-8').strip())
+    except OSError:
+        return root
+    gitdir = pathlib.Path(m.group(1)) if m else None
+    if gitdir and not gitdir.is_absolute():
+        gitdir = root / gitdir
+    return gitdir.parent.parent.parent if gitdir and gitdir.parent.name == 'worktrees' \
+        and gitdir.parent.parent.name == '.git' else root
+
+
+def claude_key(folder):
+    """A folder's key in ~/.claude.json's projects: the path with forward slashes (Claude Code matches it exactly)."""
+    return str(folder).replace('\\', '/')
+
+
 def claude_trusted(folder):
     """Whether Claude Code trusts this folder, or one above it, so a session there starts without asking."""
     try:
@@ -330,22 +357,128 @@ def claude_trusted(folder):
     return within(folder, {norm(k) for k, v in projects.items() if isinstance(v, dict) and v.get('hasTrustDialogAccepted')})
 
 
+def claude_trust_kept(folder):
+    """Whether Claude Code has a kept trust for this folder, checked the way it checks itself: its project's entry (for a
+    worktree, the repo's), or the folder or one above it, but not above its git root, so a new repo under a trusted
+    folder has none. Without one a `claude --bg` session still runs and gets the bridge's hooks, but skips what needs
+    trust (the project's own hooks and MCP servers), and the desktop app asks before it opens the folder."""
+    try:
+        projects = json.loads((HOME / '.claude.json').read_text(encoding='utf-8')).get('projects', {})
+    except (OSError, ValueError):
+        return False
+
+    def ok(d):
+        entry = projects.get(claude_key(d))
+        return isinstance(entry, dict) and entry.get('hasTrustDialogAccepted') is True
+
+    f, root = pathlib.Path(folder), git_root(folder)
+    up = [f, *f.parents]
+    return ok(main_root(root) if root else f) or any(map(ok, up[:up.index(root) + 1] if root else up))
+
+
+def too_wide(folder):
+    """A drive root, the home folder or one above it: trusting it would trust everything below it too."""
+    f = pathlib.Path(folder)
+    return f == f.parent or norm(f) in {norm(HOME), *map(norm, HOME.parents)}
+
+
+@contextlib.contextmanager
+def claude_json_lock(timeout=15):
+    """Claude Code's own lock on ~/.claude.json (a folder next to it, as proper-lockfile makes it). Running sessions
+    take it to rewrite the file; one that crashed leaves it, and like them this takes over one older than 10 s."""
+    lock, end = HOME / '.claude.json.lock', time.time() + timeout
+    while True:
+        try:
+            lock.mkdir()
+            break
+        except FileExistsError:
+            try:
+                if time.time() - lock.stat().st_mtime > 10:
+                    lock.rmdir()
+                    continue
+            except OSError:
+                continue
+            if time.time() > end:
+                sys.exit('~/.claude.json stays locked by a Claude Code session; try again in a moment.')
+            time.sleep(0.1)
+    try:
+        yield
+    finally:
+        try:
+            lock.rmdir()
+        except OSError:
+            pass
+
+
+def claude_trust(folder):
+    """Trust the folder in Claude Code, as accepting its trust dialog does: projects[<folder>].hasTrustDialogAccepted in
+    ~/.claude.json. Under Claude Code's lock it reads the file again, changes only that key, and swaps in the new file
+    whole, so a running session's own write neither gets lost nor clobbers this one."""
+    path = HOME / '.claude.json'
+    with claude_json_lock():
+        text = path.read_text(encoding='utf-8')
+        data = json.loads(text)
+        projects = data.setdefault('projects', {})
+        entry = projects.get(claude_key(folder))
+        if not isinstance(entry, dict):     # a new entry gets Claude Code's defaults for one
+            entry = projects[claude_key(folder)] = {
+                'allowedTools': [], 'mcpContextUris': [], 'mcpServers': {}, 'enabledMcpjsonServers': [],
+                'disabledMcpjsonServers': [], 'hasTrustDialogAccepted': False,
+                'hasClaudeMdExternalIncludesApproved': False, 'hasClaudeMdExternalIncludesWarningShown': False}
+        entry['hasTrustDialogAccepted'] = True
+        tmp = path.with_name(f'.claude.json.{uuid.uuid4().hex[:8]}.tmp')
+        tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2) + ('\n' if text.endswith('\n') else ''),
+                       encoding='utf-8')
+        tmp.replace(path)
+    if not claude_trust_kept(folder):
+        sys.exit(f'Wrote the trust for {folder} to ~/.claude.json, but Claude Code still would not trust it.')
+
+
+def codex_trust(call, folder):
+    """Trust the folder in Codex, as clicking "Trust" in its app does: the same config/batchWrite of
+    projects."<path>".trust_level, so Codex itself writes ~/.codex/config.toml (other keys and comments stay, and a
+    changed file in between is refused and read again). Returns whether it wrote; refuses a folder marked untrusted."""
+    key = os.path.normcase(folder)          # the app's key for a folder: lower case on Windows
+    for attempt in (1, 2):
+        read = call('config/read', {'includeLayers': True})
+        level = (((read.get('config') or {}).get('projects') or {}).get(key) or {}).get('trust_level')
+        if level == 'trusted':
+            return False
+        if level == 'untrusted':
+            sys.exit(f'Codex has {folder} marked untrusted; only the user changes that, in the Codex app.')
+        version = next((l.get('version') for l in read.get('layers') or [] if l.get('name', {}).get('type') == 'user'),
+                       None)
+        edit = {'keyPath': 'projects."' + key.replace('\\', '\\\\').replace('"', '\\"') + '".trust_level',
+                'mergeStrategy': 'replace', 'value': 'trusted'}
+        try:
+            wrote = call('config/batchWrite', {'edits': [edit], 'expectedVersion': version, 'filePath': None})
+        except RuntimeError:
+            if attempt == 2:
+                raise
+            continue                        # most likely the file changed since the read: read it again
+        if wrote.get('status') != 'ok':
+            raise RuntimeError(f'Codex did not trust the folder: another config layer overrides it ({wrote})')
+        return True
+
+
 def title_of(text):
     line = re.sub(r'\s+', ' ', next((l for l in text.splitlines() if l.strip()), 'agent thread')).strip()
     return line if len(line) <= 60 else line[:59].rstrip() + '…'
 
 
-def codex_new_thread(folder, name, sender):
-    """A new thread in the folder, made through a private `codex app-server` (the desktop app has its own): thread/start,
-    a name, and a note on where it came from, which is what makes it write the thread's rollout file. Its MCP servers
-    stay off: this server never runs a turn."""
+@contextlib.contextmanager
+def codex_app_server():
+    """A private `codex app-server` (the desktop app has its own), with its MCP servers off: it never runs a turn.
+    Yields call(method, params), which returns the result or raises RuntimeError."""
     exe = shutil.which('codex') or sys.exit('codex is not on PATH.')
     p = subprocess.Popen([exe, '-c', 'mcp_servers={}', 'app-server'], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                          stderr=subprocess.DEVNULL, text=True, encoding='utf-8')
     timer = threading.Timer(90, p.kill)
     timer.start()
+    ids = itertools.count(1)
 
-    def call(n, method, params):
+    def call(method, params):
+        n = next(ids)
         p.stdin.write(json.dumps({'jsonrpc': '2.0', 'id': n, 'method': method, 'params': params}) + '\n')
         p.stdin.flush()
         for line in p.stdout:
@@ -357,24 +490,9 @@ def codex_new_thread(folder, name, sender):
         raise RuntimeError(f'{method}: codex app-server stopped')
 
     try:
-        call(1, 'initialize', {'clientInfo': {'name': 'agent_msg', 'title': 'agent-messaging bridge', 'version': '1'}})
+        call('initialize', {'clientInfo': {'name': 'agent_msg', 'title': 'agent-messaging bridge', 'version': '1'}})
         p.stdin.write(json.dumps({'jsonrpc': '2.0', 'method': 'initialized'}) + '\n')
-        thread = call(2, 'thread/start', {'cwd': folder})['thread']
-        tid = thread['id']
-        call(3, 'thread/name/set', {'threadId': tid, 'name': name})
-        who = 'Claude Code' if sender['agent'] == 'claude' else 'Codex'
-        note = f'This thread was started by the agent-messaging bridge, from {who} thread {sender.get("thread") or "?"} ' \
-               f'in {sender.get("cwd", "")}. Its first message follows.'
-        call(4, 'thread/inject_items', {'threadId': tid, 'items': [
-            {'type': 'message', 'role': 'developer', 'content': [{'type': 'input_text', 'text': note}]}]})
-        rollout = pathlib.Path(thread.get('path') or '')
-        end = time.time() + 20
-        while thread.get('path') and not rollout.exists() and time.time() < end:
-            time.sleep(0.25)
-        if thread.get('path') and not rollout.exists():
-            raise RuntimeError('the thread was not written to disk')
-    except (RuntimeError, ValueError, OSError) as e:
-        sys.exit(f'Could not create the Codex thread: {e}')
+        yield call
     finally:
         timer.cancel()
         try:
@@ -382,7 +500,32 @@ def codex_new_thread(folder, name, sender):
             p.wait(timeout=10)
         except (OSError, subprocess.TimeoutExpired):
             p.kill()
-    return tid
+
+
+def codex_new_thread(folder, name, sender, trust=False):
+    """A new thread in the folder, made through a private app-server: thread/start, a name, and a note on where it came
+    from, which is what makes it write the thread's rollout file. With trust, it trusts the folder first. Returns the
+    thread id and whether it wrote the trust."""
+    try:
+        with codex_app_server() as call:
+            trusted = codex_trust(call, folder) if trust else False
+            thread = call('thread/start', {'cwd': folder})['thread']
+            tid = thread['id']
+            call('thread/name/set', {'threadId': tid, 'name': name})
+            who = 'Claude Code' if sender['agent'] == 'claude' else 'Codex'
+            note = f'This thread was started by the agent-messaging bridge, from {who} thread ' \
+                   f'{sender.get("thread") or "?"} in {sender.get("cwd", "")}. Its first message follows.'
+            call('thread/inject_items', {'threadId': tid, 'items': [
+                {'type': 'message', 'role': 'developer', 'content': [{'type': 'input_text', 'text': note}]}]})
+            rollout = pathlib.Path(thread.get('path') or '')
+            end = time.time() + 20
+            while thread.get('path') and not rollout.exists() and time.time() < end:
+                time.sleep(0.25)
+            if thread.get('path') and not rollout.exists():
+                raise RuntimeError('the thread was not written to disk')
+    except (RuntimeError, ValueError, OSError) as e:
+        sys.exit(f'Could not create the Codex thread: {e}')
+    return tid, trusted
 
 
 def claude_background(folder, name, body):
@@ -401,16 +544,33 @@ def claude_background(folder, name, body):
 def start(args):
     """A new thread for a folder in the other agent's app, started in the background: no window comes up. Where that
     can't work yet (a folder that isn't a Codex project, one Claude Code doesn't trust), or with --open, the app's
-    new-thread deep link fills in the prompt instead, for the user to read and send."""
+    new-thread deep link fills in the prompt instead, for the user to read and send. With --trust it trusts the folder in
+    that app first, as the user's click on "Trust" would, and then starts it in the background all the same."""
     text = message_text(args).strip()
-    folder = os.path.abspath(args.cwd or os.getcwd())
+    # to trust it, the path as on disk: Claude Code matches its key's case exactly
+    folder = (os.path.realpath if args.trust else os.path.abspath)(args.cwd or os.getcwd())
     if not os.path.isdir(folder):
         sys.exit(f'No such folder: {folder}')
+    if args.trust and too_wide(folder):
+        sys.exit(f'Not trusting {folder}: a drive, the home folder or one above it would trust everything below it.')
     sender = me(os.getcwd())
     msg = {'id': uuid.uuid4().hex, 'sent': now(), 'from': sender, 'message': text}
     name = args.name or title_of(text)
     app = 'Codex' if args.to == 'codex' else 'Claude Code'
-    ready = codex_project(folder) if args.to == 'codex' else claude_trusted(folder)
+    trusted = []                            # where this run wrote a trust, to say so and log it
+    if args.trust and args.to == 'claude' and not claude_trust_kept(folder):
+        claude_trust(folder)
+        trusted.append('~/.claude.json')
+    if args.trust and args.to == 'codex' and args.open:
+        try:
+            with codex_app_server() as call:
+                if codex_trust(call, folder):
+                    trusted.append('~/.codex/config.toml')
+        except (RuntimeError, ValueError, OSError) as e:
+            sys.exit(f'Could not trust the folder in Codex: {e}')
+    ready = args.trust or (codex_project(folder) if args.to == 'codex' else claude_trusted(folder))
+    if trusted:
+        print(f'Trusted {folder} in {app} ({trusted[0]}), as its "Trust" button does.')
     if args.open or not ready:
         body = f'{header(sender, msg["sent"])}\n\n{text}\n\n{reply_hint(sender)}'
         q = lambda s: urllib.parse.quote(s, safe='')
@@ -425,11 +585,17 @@ def start(args):
         print(f'Opened a new {app} thread for {folder} with the prompt filled in{why}. Nothing runs until the user '
               'sends it.')
     elif args.to == 'codex':
-        target = {'id': codex_new_thread(folder, name, sender), 'name': name, 'cwd': folder}
+        tid, wrote = codex_new_thread(folder, name, sender, trust=args.trust)
+        if wrote:
+            trusted.append('~/.codex/config.toml')
+            print(f'Trusted {folder} in Codex (~/.codex/config.toml), as its "Trust" button does.')
+        target = {'id': tid, 'name': name, 'cwd': folder}
+        where = 'find it under the project in its sidebar' if codex_project(folder) else \
+            'the folder is not a project in the app yet, so its sidebar may not list it until you add the folder'
         if codex_queue(target, msg):
             how = 'started: the Codex app runs it'
             print(f'Started Codex thread "{name}" {target["id"]} in {folder}: the Codex app runs it now, in the '
-                  'background (find it under the project in its sidebar).')
+                  f'background ({where}).')
         else:
             how = 'queued: the Codex app is not running'
             print(f'Made Codex thread "{name}" {target["id"]} in {folder} and queued the message, but the Codex app is '
@@ -442,7 +608,7 @@ def start(args):
               f'`claude attach {target["id"][:8]}` or `claude agents`; write to it with send --to claude --thread '
               f'{target["id"][:8]}.')
     log({'sent': msg['sent'], 'id': msg['id'], 'kind': 'start', 'from': sender, 'to': {'agent': args.to, **target},
-         'chars': len(text), 'how': how})
+         'chars': len(text), 'how': how, **({'trusted': trusted} if trusted else {})})
 
 
 # ---------------------------------------------------------------------------------------------------- receiving
@@ -688,6 +854,8 @@ def main():
     p.add_argument('--message'); p.add_argument('--message-file')
     p.add_argument('--open', action='store_true',
                    help="fill in the prompt in the app's window instead, for the user to read and send")
+    p.add_argument('--trust', action='store_true',
+                   help='first trust the folder in that app, as its "Trust" button does (only when the user asked)')
     p.set_defaults(fn=start)
     args = ap.parse_args()
     args.fn(args)
