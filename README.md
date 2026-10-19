@@ -20,7 +20,7 @@ Agentwachter is a personal toolkit in three parts:
 
 Everything runs locally.
 
-> This is a private workflow repo. [UsageTray](https://github.com/MosrednA/UsageTray) is its public, generic sibling. The tray here reuses UsageTray's look so the two can merge later (see [Merging into UsageTray](#merging-into-usagetray)).
+> It was built for one Windows workflow and is shared as it is. [UsageTray](https://github.com/MosrednA/UsageTray) is its sibling: the tray here reuses UsageTray's look so the two can merge later (see [Merging into UsageTray](#merging-into-usagetray)).
 
 ## At a glance
 
@@ -51,10 +51,13 @@ The **overview** page (*overview ↗* in the flyout) shows the same sessions wit
 
 ## Setup
 
+You need Windows, Python 3, Node 24 and the .NET 10 SDK. Run the commands below in `cmd`, from the root of your clone.
+
 **1. The bridge.** It lives in this repo. A junction gives it the path the agents and hooks expect.
 
 ```bat
-mklink /J "%USERPROFILE%\.agents\skills\agent-messaging" "C:\Projects\Agentwachter\bridge"
+mkdir "%USERPROFILE%\.agents\skills" "%USERPROFILE%\.claude\skills" "%USERPROFILE%\.codex\skills" 2>nul
+mklink /J "%USERPROFILE%\.agents\skills\agent-messaging" "%CD%\bridge"
 mklink /J "%USERPROFILE%\.claude\skills\agent-messaging" "%USERPROFILE%\.agents\skills\agent-messaging"
 mklink /J "%USERPROFILE%\.codex\skills\agent-messaging"  "%USERPROFILE%\.agents\skills\agent-messaging"
 ```
@@ -68,7 +71,7 @@ Then add the hooks: one entry per event under `UserPromptSubmit`, `PostToolUse` 
     "command": "[ -z \"$(ls ~/.agents/inbox/claude/*/*.json 2>/dev/null)\" ] || python ~/.agents/skills/agent-messaging/agent_msg.py hook" }
   ```
 
-- **`~/.codex/hooks.json`**:
+- **`~/.codex/hooks.json`** (put your Windows user name in place of `<you>`):
 
   ```json
   { "type": "command", "timeout": 30,
