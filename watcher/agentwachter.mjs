@@ -25,12 +25,13 @@ const PORT = Number(process.env.AGENTWACHTER_PORT) || 17321;
 const MIN = 60_000, HOUR = 60 * MIN;
 const REFRESH = 30_000;
 const CODEX_RECENT = (Number(process.env.AGENTWACHTER_CODEX_HOURS) || 12) * HOUR; // Codex threads older than this are left out
-const QUIET = 10 * MIN;  // working, but nothing written for this long: stil
-const ORPHAN = HOUR;     // a Codex turn "in progress" that has written nothing for this long: dood
+const QUIET = 10 * MIN;  // working, but nothing written for this long: quiet
+const ORPHAN = HOUR;     // a Codex turn "in progress" that has written nothing for this long: dead
+const DONE_KEEP = (Number(process.env.AGENTWACHTER_DONE_HOURS) || 1) * HOUR; // done sessions idle longer than this are left out
 // Going in circles: busy, mostly re-running what it already ran this hour, and not touching any new file.
 const CIRCLES = { toolsPerHour: 40, repeatRatio: 0.5 };
 
-const STATES = ['wacht op jou', 'bezig', 'stil', 'klaar', 'dood'];
+const STATES = ['waiting', 'busy', 'quiet', 'done', 'dead'];
 const EDIT_TOOLS = new Set(['Edit', 'MultiEdit', 'Write', 'NotebookEdit']);
 
 // ---------- incremental reading ----------
@@ -467,9 +468,10 @@ async function refresh() {
       keys.add(key);
       const s = file ? follow(key, file, claudeLine, now) : new Stats();
       const last = Math.max(s.lastAt, file ? mtime(file) : 0, j.statusUpdatedAt || 0);
-      const state = j.status === 'waiting' ? 'wacht op jou'
-        : j.status === 'busy' ? (now - last > QUIET ? 'stil' : 'bezig')
-        : 'klaar';
+      const state = j.status === 'waiting' ? 'waiting'
+        : j.status === 'busy' ? (now - last > QUIET ? 'quiet' : 'busy')
+        : 'done';
+      if (state === 'done' && now - last > DONE_KEEP) continue; // still followed, so it isn't read from the start again
       sessions.push({
         tool: 'claude',
         id: j.sessionId,
@@ -480,7 +482,7 @@ async function refresh() {
         cwd: j.cwd,
         state,
         stateSince: iso(j.statusUpdatedAt),
-        summary: [state === 'wacht op jou' && j.waitingFor, s.text].filter(Boolean).join(' · '),
+        summary: [state === 'waiting' && j.waitingFor, s.text].filter(Boolean).join(' · '),
         lastActivity: iso(last),
         ...metrics(s, now),
         bridge: Bridge.summary(bridge.sessions.get(j.sessionId), now),
@@ -498,11 +500,12 @@ async function refresh() {
       const s = follow(key, file, codexLine, now);
       const last = Math.max(s.lastAt, mtime(file));
       const open = s.turnOpen ?? r.turn?.status === 'inProgress';
-      const state = !open ? 'klaar'
-        : s.pendingInput ? 'wacht op jou'
-        : codexRunning === false || now - last > ORPHAN ? 'dood'
-        : now - last > QUIET ? 'stil'
-        : 'bezig';
+      const state = !open ? 'done'
+        : s.pendingInput ? 'waiting'
+        : codexRunning === false || now - last > ORPHAN ? 'dead'
+        : now - last > QUIET ? 'quiet'
+        : 'busy';
+      if (state === 'done' && now - last > DONE_KEEP) continue;
       const since = open ? r.turn?.started_at : r.turn?.completed_at;
       const note = !open && ['failed', 'interrupted'].includes(r.turn?.status) ? r.turn.status : null;
       sessions.push({
@@ -583,21 +586,21 @@ function replay(file) {
 // ---------- http ----------
 
 const PAGE = `<!doctype html>
-<html lang="nl"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Agentwachter</title>
 <style>
-:root{--bg:#1c1d22;--row:#24252b;--text:#ececf0;--muted:#8b8e9a;--ok:#4cc38a;--warn:#f0a43a;--hot:#ef5b52;--blue:#6aa8f0}
+:root{--bg:#1c1d22;--row:#24252b;--text:#ececf0;--muted:#8b8e9a;--ok:#4cc38a;--warn:#f0a43a;--hot:#ef5b52}
 body{margin:0;padding:16px;background:var(--bg);color:var(--text);font:13px/1.4 "Segoe UI",system-ui,sans-serif}
 h1{font-size:15px;margin:0 0 12px;font-weight:600}h1 span{color:var(--muted);font-weight:400}
 table{border-collapse:collapse;width:100%}td,th{padding:5px 8px;text-align:left;white-space:nowrap}
 th{color:var(--muted);font-weight:400;font-size:12px}tr+tr td{border-top:1px solid var(--row)}
 td.sum{color:var(--muted);max-width:520px;overflow:hidden;text-overflow:ellipsis}td.n{text-align:right;font-family:Consolas,monospace}
 .chip{display:inline-block;padding:1px 8px;border-radius:9px;font-size:12px;color:#111}
-.bezig{background:var(--ok)}.wacht{background:var(--blue)}.stil{background:var(--warn)}.klaar{background:var(--muted)}.dood{background:#555;color:var(--text)}
+.busy{background:var(--ok)}.waiting{background:var(--warn)}.quiet,.done{background:var(--muted)}.dead{background:var(--hot)}
 .flag{color:var(--hot);font-weight:600}
 </style></head><body>
 <h1>Agentwachter <span id="upd"></span></h1>
-<table><thead><tr><th></th><th>tool</th><th>project</th><th>sessie</th><th>wat nu</th><th>tok/u</th><th>tools/u</th><th>fout</th><th>herhaal</th><th>patch</th></tr></thead><tbody id="rows"></tbody></table>
+<table><thead><tr><th></th><th>tool</th><th>project</th><th>session</th><th>latest</th><th>tok/h</th><th>tools/h</th><th>errors</th><th>repeats</th><th>patch</th></tr></thead><tbody id="rows"></tbody></table>
 <script>
 const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 const pct = x => x == null ? '' : Math.round(x * 100) + '%';
@@ -606,12 +609,12 @@ async function load() {
   try {
     const d = await (await fetch('agents')).json();
     document.getElementById('upd').textContent = new Date(d.updated).toLocaleTimeString();
-    document.getElementById('rows').innerHTML = d.sessions.map(s => '<tr><td><span class="chip ' + s.state.split(' ')[0] + '">' + esc(s.state) + '</span>'
-      + (s.circles ? ' <span class="flag" title="veel bezig, veel herhaling, geen nieuwe bestanden">rondjes</span>' : '') + '</td>'
+    document.getElementById('rows').innerHTML = d.sessions.map(s => '<tr><td><span class="chip ' + s.state + '">' + esc(s.state) + '</span>'
+      + (s.circles ? ' <span class="flag" title="busy, mostly repeats, no new files">circles</span>' : '') + '</td>'
       + '<td>' + s.tool + '</td><td>' + esc(s.project) + '</td><td>' + esc(s.title) + '</td><td class="sum" title="' + esc(s.summary) + '">' + esc(s.summary) + '</td>'
       + '<td class="n">' + tok(s.tokensPerHour) + '</td><td class="n">' + (s.toolsPerHour || '') + '</td><td class="n">' + pct(s.errorRate) + '</td>'
       + '<td class="n">' + pct(s.repeatRatio) + '</td><td class="n">' + (s.minsSincePatch == null ? '' : s.minsSincePatch + 'm') + '</td></tr>').join('');
-  } catch { document.getElementById('upd').textContent = 'niet bereikbaar'; }
+  } catch { document.getElementById('upd').textContent = 'not reachable'; }
 }
 load(); setInterval(load, 30000);
 </script></body></html>`;

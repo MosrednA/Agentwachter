@@ -4,14 +4,14 @@ using System.Text.Json.Nodes;
 namespace Agentwachter;
 
 /// <param name="Tool">"claude" or "codex".</param>
-/// <param name="State">The watcher's state: "bezig", "wacht op jou", "stil", "klaar" or "dood".</param>
+/// <param name="State">The watcher's state: "busy", "waiting", "quiet", "done" or "dead".</param>
 /// <param name="Link">The Claude desktop app's id for the session ("local_…"), when it runs there.</param>
 /// <param name="Circles">Busy, mostly repeating itself and touching no new files.</param>
 sealed record AgentSession(
     string Tool, string Project, string Title, string State, string Summary, string? Link,
     double TokensPerHour, double ToolsPerHour, double ErrorRate, double RepeatRatio, double? MinsSincePatch, bool Circles)
 {
-    public bool Done => State == "klaar";
+    public bool Done => State == "done";
 }
 
 /// <summary>Running Claude Code and Codex sessions, from the watcher's JSON on 127.0.0.1.</summary>

@@ -19,7 +19,7 @@ sealed class TrayApp : ApplicationContext
 
     public TrayApp()
     {
-        var autostart = new ToolStripMenuItem(L.T("Start with Windows", "Start met Windows"))
+        var autostart = new ToolStripMenuItem("Start with Windows")
         {
             Checked = Autostart.Enabled,
             CheckOnClick = true,
@@ -30,12 +30,12 @@ sealed class TrayApp : ApplicationContext
         {
             Items =
             {
-                new ToolStripMenuItem(L.T("Refresh", "Vernieuwen"), null, (_, _) => _ = RefreshAsync()),
-                new ToolStripMenuItem(L.T("Open overview", "Overzicht openen"), null, (_, _) => OpenOverview()),
+                new ToolStripMenuItem("Refresh", null, (_, _) => _ = RefreshAsync()),
+                new ToolStripMenuItem("Open overview", null, (_, _) => OpenOverview()),
                 new ToolStripSeparator(),
                 autostart,
                 new ToolStripSeparator(),
-                new ToolStripMenuItem(L.T("Quit", "Afsluiten"), null, (_, _) => ExitThread()),
+                new ToolStripMenuItem("Quit", null, (_, _) => ExitThread()),
             },
         };
         _tray.Icon = TrayIcon.Render(null);
@@ -92,9 +92,9 @@ sealed class TrayApp : ApplicationContext
         old?.Dispose();
 
         var tip = _agents is null
-            ? "Agentwachter: " + L.T("watcher not running", "watcher draait niet")
+            ? "Agentwachter: watcher not running"
             : "Agentwachter" + string.Concat(_agents
-                .GroupBy(a => a.Circles ? L.T("in circles", "rondjes") : a.State)
+                .GroupBy(a => a.Circles ? "in circles" : a.State)
                 .Select(s => $" · {s.Count()} {s.Key}"));
         _tray.Text = tip.Length > 127 ? tip[..127] : tip;
     }

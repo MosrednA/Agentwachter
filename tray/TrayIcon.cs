@@ -46,8 +46,8 @@ static class TrayIcon
 
     /// <summary>Red: going in circles or dead. Orange: waiting for you. Green: working. Grey: all done.</summary>
     public static Color Worst(IReadOnlyList<AgentSession> agents) =>
-        agents.Any(a => a.Circles || a.State == "dood") ? Theme.Hot
-        : agents.Any(a => a.State == "wacht op jou") ? Theme.Warn
+        agents.Any(a => a.Circles || a.State == "dead") ? Theme.Hot
+        : agents.Any(a => a.State == "waiting") ? Theme.Warn
         : agents.Any(a => !a.Done) ? Theme.Ok
         : Theme.Muted;
 

@@ -8,13 +8,12 @@ A personal toolkit for running **Claude Code and Codex side by side** on one Win
 Everything runs locally. It only reads files that Claude Code and Codex already write, so watching costs no turns and no usage limit.
 
 ```
- Agents                                     2 busy · 20 done
- cl  [ busy ]  Agentwachter  Tray rebuilt, watcher found…  27M
- cx  [ busy ]  mossub        Score 1189 → 1192 after the…  2,8M
- cl  [ wait ]  MosListen     Shall I push to GitHub?…      14M
- cx  [ done ]  kit           Done: health page wired up    215k
-         +12 done
- 10:31 · click to refresh                         overview ↗
+ Agents                               2 busy · 1 waiting · 1 done
+ cl  [ busy    ]  Agentwachter  Tray rebuilt, watcher found…  27M
+ cx  [ busy    ]  mossub        Score 1189 → 1192 after the…  2,8M
+ cl  [ waiting ]  MosListen     Shall I push to GitHub?…      14M
+ cx  [ done    ]  kit           Done: health page wired up    215k
+ 10:31 · click to refresh                              overview ↗
 ```
 
 <sub>An illustration with made-up rows. The real flyout uses UsageTray's dark theme.</sub>
@@ -110,7 +109,7 @@ node watcher/agentwachter.mjs --replay <file>   per-hour heuristics for a Codex 
 |---|---|---|
 | `AGENTWACHTER_PORT` | 17321 | Port on 127.0.0.1, for both the watcher and the tray. |
 | `AGENTWACHTER_CODEX_HOURS` | 12 | Codex threads not updated within this window are left out. |
-| `AGENTWACHTER_LANG` | Windows display language | Tray language: `nl` or `en`. |
+| `AGENTWACHTER_DONE_HOURS` | 1 | Done sessions with no activity within this window are left out. |
 
 ### Sources (read-only)
 
@@ -128,15 +127,15 @@ All files are opened with full sharing and never written. The SQLite databases a
 ### Heuristics (sliding last hour)
 
 - **state**
-  - *bezig*: working.
-  - *wacht op jou*: a permission prompt, or a Codex `request_user_input` with no answer.
-  - *stil*: working, but nothing written for 10 min.
-  - *klaar*: idle.
-  - *dood*: a Codex turn is still open but no Codex process runs, or nothing has been written for 60 min.
+  - *busy*: working.
+  - *waiting*: a permission prompt, or a Codex `request_user_input` with no answer.
+  - *quiet*: working, but nothing written for 10 min.
+  - *done*: idle. A done session drops off the list after an hour without activity (`AGENTWACHTER_DONE_HOURS`).
+  - *dead*: a Codex turn is still open but no Codex process runs, or nothing has been written for 60 min.
 - **tokensPerHour, toolsPerHour, errorRate.**
 - **repeatRatio**: the share of tool calls whose fingerprint was already seen in the past hour. A fingerprint is the command or input, with digits replaced by N and whitespace collapsed.
 - **newFiles, minsSincePatch**: files patched for the first time in the hour, and minutes since the last patch.
-- **circles** ("rondjes"): at least 40 tool calls in the past hour, at least 50% of them repeats, and no new file touched.
+- **circles**: at least 40 tool calls in the past hour, at least 50% of them repeats, and no new file touched.
 
 ### Validation (mossub)
 
@@ -156,7 +155,7 @@ The test run took ~23.5 h, with 232.6M tokens and 1461 tool calls.
   - Grey: all done.
   - An empty ring: the watcher isn't answering.
 - **Flyout:** one line per session, showing the tool (`cl`/`cx`), its state, the project, what it last said, and tokens per hour.
-  - Sessions that aren't done always show. Finished ones fill up to ten lines, and the rest are counted.
+  - Sessions that aren't done always show. Finished ones from the past hour fill up to ten lines, and the rest are counted.
   - Hover a line for its title and numbers.
   - Click a Claude line to open that session in the Claude desktop app.
   - *overview ↗* opens the watcher's page.
@@ -169,7 +168,7 @@ The test run took ~23.5 h, with 232.6M tokens and 1461 tool calls.
 
 ## Roadmap
 
-- **Phase 2: a judge.** A small decision model reads each session's recent messages and answers "how is this agent doing?". Its choices are *schiet op*, *draait rondjes*, *wacht op jou*, *vastgelopen* or *klaar*. On five real mossub moments:
+- **Phase 2: a judge.** A small decision model reads each session's recent messages and answers "how is this agent doing?". Its choices are *making progress*, *going in circles*, *waiting for you*, *stuck* or *done*. On five real mossub moments:
 
   | Judge | Score | Speed |
   |---|---|---|

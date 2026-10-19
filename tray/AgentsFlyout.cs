@@ -122,10 +122,10 @@ sealed class AgentsFlyout : Flyout
         a.Summary,
         string.Join(" · ", new[]
         {
-            $"{a.ToolsPerHour:0} " + L.T("tool calls/h", "tool calls/u"),
-            $"{a.ErrorRate:0%} " + L.T("errors", "fouten"),
-            $"{a.RepeatRatio:0%} " + L.T("repeats", "herhaald"),
-            a.MinsSincePatch is { } m ? L.T($"last patch {m:0} min ago", $"laatste patch {m:0} min geleden") : null,
+            $"{a.ToolsPerHour:0} tool calls/h",
+            $"{a.ErrorRate:0%} errors",
+            $"{a.RepeatRatio:0%} repeats",
+            a.MinsSincePatch is { } m ? $"last patch {m:0} min ago" : null,
         }.Where(s => s is not null)),
     }.Where(s => !string.IsNullOrEmpty(s)));
 
@@ -180,7 +180,7 @@ sealed class AgentsFlyout : Flyout
 
         if (_agents is null)
         {
-            var state = _updated is null ? L.T("Starting…", "Starten…") : L.T("Watcher not running", "Watcher draait niet");
+            var state = _updated is null ? "Starting…" : "Watcher not running";
             Label(g, state, small, Theme.Warn, new Rectangle(left, y, right - left, rowH));
             y += rowH;
             if (_error is not null)
@@ -191,7 +191,7 @@ sealed class AgentsFlyout : Flyout
         }
         else if (_agents.Count == 0)
         {
-            Label(g, L.T("No sessions running", "Geen sessies actief"), small, Theme.Muted, new Rectangle(left, y, right - left, rowH));
+            Label(g, "No sessions running", small, Theme.Muted, new Rectangle(left, y, right - left, rowH));
             y += rowH;
         }
         else
@@ -205,7 +205,7 @@ sealed class AgentsFlyout : Flyout
             }
             if (hidden > 0)
             {
-                Label(g, $"+{hidden} " + L.T("done", "klaar"), small, Theme.Muted, Rectangle.FromLTRB(left + Px(TagW), y, right, y + rowH));
+                Label(g, $"+{hidden} done", small, Theme.Muted, Rectangle.FromLTRB(left + Px(TagW), y, right, y + rowH));
                 y += rowH;
             }
         }
@@ -216,10 +216,10 @@ sealed class AgentsFlyout : Flyout
         _footer = new Rectangle(0, y, Width, Height - y);
         var footer = Rectangle.FromLTRB(left, y, right, y + Px(FootH));
         if (_updated is { } u)
-            Label(g, $"{u:HH:mm} · " + L.T("click to refresh", "klik = verversen"), small, Theme.Muted, footer);
+            Label(g, $"{u:HH:mm} · click to refresh", small, Theme.Muted, footer);
         if (_agents is not null)
         {
-            var overview = L.T("overview ↗", "overzicht ↗");
+            var overview = "overview ↗";
             var w = TextRenderer.MeasureText(g, overview, small, Size.Empty, TextFormatFlags.NoPadding).Width;
             _overview = Rectangle.FromLTRB(right - w, y, right, y + Px(FootH));
             Label(g, overview, small, Theme.Muted, footer, right: true);
@@ -249,15 +249,13 @@ sealed class AgentsFlyout : Flyout
         Label(g, Tokens(a.TokensPerHour), mono, Theme.Muted, new Rectangle(tokensX, y, Px(TokensW), rowH), right: true);
     }
 
-    static (string Text, Color Color) Chip(AgentSession a) => a switch
+    static (string Text, Color Color) Chip(AgentSession a) => a.Circles ? ("circles", Theme.Hot) : (a.State, a.State switch
     {
-        { Circles: true } => (L.T("circles", "rondjes"), Theme.Hot),
-        { State: "wacht op jou" } => (L.T("waiting", "wacht"), Theme.Warn),
-        { State: "bezig" } => (L.T("busy", "bezig"), Theme.Ok),
-        { State: "stil" } => (L.T("quiet", "stil"), Theme.Muted),
-        { State: "dood" } => (L.T("dead", "dood"), Theme.Hot),
-        _ => (L.T("done", "klaar"), Theme.Muted),
-    };
+        "waiting" => Theme.Warn,
+        "busy" => Theme.Ok,
+        "dead" => Theme.Hot,
+        _ => Theme.Muted,
+    });
 
     /// <summary>Tokens per hour, short: 850k, 2.4M, 31M.</summary>
     static string Tokens(double perHour) => perHour switch

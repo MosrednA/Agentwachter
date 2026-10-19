@@ -38,7 +38,7 @@ sealed class Watcher : IDisposable
         var script = FindScript();
         if (script is null)
         {
-            LastError = L.T("agentwachter.mjs not found next to this app", "agentwachter.mjs niet gevonden naast deze app");
+            LastError = "agentwachter.mjs not found next to this app";
             return false;
         }
         try
@@ -63,7 +63,7 @@ sealed class Watcher : IDisposable
         }
         catch (Win32Exception ex)
         {
-            LastError = L.T("cannot start node: ", "node start niet: ") + ex.Message;
+            LastError = "cannot start node: " + ex.Message;
             return false;
         }
     }
