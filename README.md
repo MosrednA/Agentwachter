@@ -218,3 +218,7 @@ Stop-Process $demo
 ## Merging into UsageTray
 
 `tray/Theme.cs` and `tray/Flyout.cs` are copies of UsageTray's, with only the namespace changed. `AgentsSource.cs` has no dependencies. `AgentsFlyout.DrawLine` uses UsageTray's fonts, units and colors. A merge would add the agents list as one more flyout section, point it at the watcher's `/agents`, and embed the two icons.
+
+## License
+
+[MIT](LICENSE). The icons in `watcher/icons/` are the Claude and Codex app icons. They belong to Anthropic and OpenAI and aren't covered by this license.
