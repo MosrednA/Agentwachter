@@ -10,6 +10,10 @@ works.
 - Watcher: `node watcher/agentwachter.mjs` (Node 24, no dependencies). Tray: `dotnet build tray`,
   then `tray\bin\Debug\net10.0-windows\AgentwachterTray.exe`, which starts and stops the watcher
   itself.
+- An agent's shell runs inside the Claude app's job object, so a tray started from it with
+  `Start-Process` goes down when the Claude app restarts or updates. Start the
+  long-lived tray outside it: `Invoke-CimMethod Win32_Process -MethodName Create -Arguments
+  @{CommandLine='"<path>\AgentwachterTray.exe"'}`.
 - Check the tray without clicking: `AgentwachterTray.exe --snapshot out.png`. README images come
   from the demo data on a spare port ("Redrawing the screenshots"), never from real sessions.
 - `bridge/` is live for every agent on this machine (`~/.agents/skills/agent-messaging` is a
