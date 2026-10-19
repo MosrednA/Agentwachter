@@ -1,0 +1,82 @@
+{
+ "updated": "2026-10-19T08:31:07.000Z",
+ "sessions": [
+  {
+   "tool": "claude", "id": "demo-1", "link": null, "title": "Compute the Ultimate Question", "project": "deep-thought",
+   "state": "waiting", "summary": "Allow Bash: rm -rf ./answers/41 · The answer is 42; the question is still pending",
+   "lastActivity": "2026-10-19T08:30:52.000Z",
+   "tokensPerHour": 3140000, "toolsPerHour": 38, "errorRate": 0.03, "repeatRatio": 0.08, "newFiles": 4, "minsSincePatch": 2, "circles": false,
+   "subagents": []
+  },
+  {
+   "tool": "codex", "id": "demo-2", "link": null, "title": "Make the Brainfuck interpreter pass its own tests", "project": "turing-tarpit",
+   "state": "busy", "summary": "Re-running the test suite (attempt 31) after changing nothing",
+   "lastActivity": "2026-10-19T08:30:58.000Z",
+   "tokensPerHour": 9400000, "toolsPerHour": 64, "errorRate": 0.41, "repeatRatio": 0.72, "newFiles": 0, "minsSincePatch": 48, "circles": true,
+   "subagents": []
+  },
+  {
+   "tool": "claude", "id": "demo-3", "link": null, "title": "Warp drive refactor", "project": "warp-core",
+   "state": "busy", "summary": "Dilithium matrix realigned; two subagents are on the plasma conduits",
+   "lastActivity": "2026-10-19T08:31:01.000Z",
+   "tokensPerHour": 27000000, "toolsPerHour": 112, "errorRate": 0.04, "repeatRatio": 0.06, "newFiles": 17, "minsSincePatch": 1, "circles": false,
+   "subagents": [
+    {
+     "name": "Explore", "title": "Trace every caller of tachyon_flux()", "state": "busy",
+     "summary": "Found 23 callers; 3 of them divide by c", "lastActivity": "2026-10-19T08:31:03.000Z",
+     "tokensPerHour": 4200000, "toolsPerHour": 51, "errorRate": 0, "repeatRatio": 0.02, "newFiles": 0, "minsSincePatch": null, "circles": false
+    },
+    {
+     "name": "general-purpose", "title": "Port the warp-field solver to Rust", "state": "busy",
+     "summary": "Borrow checker vs. antimatter: 2–0", "lastActivity": "2026-10-19T08:30:49.000Z",
+     "tokensPerHour": 2800000, "toolsPerHour": 29, "errorRate": 0.21, "repeatRatio": 0.1, "newFiles": 6, "minsSincePatch": 3, "circles": false
+    },
+    {
+     "name": "Plan", "title": "Plan the nacelle API", "state": "done",
+     "summary": "Plan ready: 4 steps, 0 paradoxes", "lastActivity": "2026-10-19T08:12:40.000Z",
+     "tokensPerHour": 610000, "toolsPerHour": 12, "errorRate": 0, "repeatRatio": 0, "newFiles": 0, "minsSincePatch": null, "circles": false
+    },
+    {
+     "name": "Explore", "title": "Map the EPS grid", "state": "done",
+     "summary": "EPS grid mapped: 9 relays, 1 of them held together by a TODO", "lastActivity": "2026-10-19T08:05:11.000Z",
+     "tokensPerHour": 940000, "toolsPerHour": 33, "errorRate": 0, "repeatRatio": 0.03, "newFiles": 0, "minsSincePatch": null, "circles": false
+    }
+   ]
+  },
+  {
+   "tool": "codex", "id": "demo-4", "link": null, "title": "Holodeck safety protocols", "project": "holodeck",
+   "state": "busy", "summary": "Waiting for the safety officer before touching the arch",
+   "lastActivity": "2026-10-19T08:30:40.000Z",
+   "tokensPerHour": 2100000, "toolsPerHour": 22, "errorRate": 0.05, "repeatRatio": 0.09, "newFiles": 2, "minsSincePatch": 6, "circles": false,
+   "subagents": [
+    {
+     "name": "safety_officer", "title": "Worf", "state": "busy",
+     "summary": "Disabling the 'Arch' command for non-officers", "lastActivity": "2026-10-19T08:30:57.000Z",
+     "tokensPerHour": 870000, "toolsPerHour": 18, "errorRate": 0, "repeatRatio": 0.05, "newFiles": 1, "minsSincePatch": 2, "circles": false
+    }
+   ]
+  },
+  {
+   "tool": "claude", "id": "demo-5", "link": null, "title": "Release build of the rotor simulator", "project": "enigma-rotor",
+   "state": "quiet", "summary": "cargo build --release: compiling 1,337 crates…",
+   "lastActivity": "2026-10-19T08:17:44.000Z",
+   "tokensPerHour": 120000, "toolsPerHour": 4, "errorRate": 0, "repeatRatio": 0.25, "newFiles": 0, "minsSincePatch": 31, "circles": false,
+   "subagents": []
+  },
+  {
+   "tool": "claude", "id": "demo-6", "link": null, "title": "Pod bay door controller", "project": "hal-9000",
+   "state": "done", "summary": "PR merged. I'm afraid I can't break the build, Dave.",
+   "lastActivity": "2026-10-19T08:22:09.000Z",
+   "tokensPerHour": 1400000, "toolsPerHour": 27, "errorRate": 0.01, "repeatRatio": 0.04, "newFiles": 3, "minsSincePatch": 12, "circles": false,
+   "subagents": []
+  },
+  {
+   "tool": "codex", "id": "demo-7", "link": null, "title": "Cantina rate limiter", "project": "mos-eisley",
+   "state": "done", "summary": "Shipped: the Kessel Run now takes 11.8 parsecs",
+   "lastActivity": "2026-10-19T07:58:30.000Z",
+   "tokensPerHour": 215000, "toolsPerHour": 9, "errorRate": 0, "repeatRatio": 0, "newFiles": 1, "minsSincePatch": 35, "circles": false,
+   "subagents": []
+  }
+ ],
+ "projects": []
+}

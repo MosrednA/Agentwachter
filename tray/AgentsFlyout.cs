@@ -6,13 +6,29 @@ namespace Agentwachter;
 
 /// <summary>
 /// Borderless flyout above the tray. One line per running session: tool, state, project, what it last
-/// said, tokens per hour. Hover a line for its numbers; click a Claude line to open it in the desktop app.
+/// said, tokens per hour, with its running subagents on a tree line under it. Hover a line for its numbers;
+/// click a Claude line to open its session in the desktop app.
 /// </summary>
 sealed class AgentsFlyout : Flyout
 {
     // Layout in 96-dpi units.
     const int W = 420, Pad = 12, HeadH = 24, RowH = 20, FootH = 24, MaxRows = 10;
-    const int TagW = 22, ChipW = 52, ProjectW = 80, TokensW = 40;
+    const int TagW = 22, IconW = 14, ChipW = 52, ProjectW = 80, TokensW = 40;
+
+    /// <summary>The tools' taskbar icons, embedded from the watcher's icons folder.</summary>
+    static readonly Dictionary<string, Bitmap> Icons = new[] { "claude", "codex" }.ToDictionary(tool => tool, tool =>
+    {
+        using var stream = typeof(AgentsFlyout).Assembly.GetManifestResourceStream(tool + ".png")!;
+        using var image = Image.FromStream(stream);
+        return new Bitmap(image); // a copy, so the stream can close
+    });
+
+    enum Tree { None, Mid, End }
+
+    static readonly Color TreeLine = Color.FromArgb(0x53, 0x55, 0x5E); // Muted at half strength on Bg, but opaque so segments don't add up
+
+    /// <summary>A session (Tree None), one of its running subagents, or a note closing its subagents (Agent null).</summary>
+    readonly record struct Line(AgentSession? Agent, Tree Tree, string? Note = null);
 
     IReadOnlyList<AgentSession>? _agents; // null: the watcher does not answer
     string? _error;
@@ -127,15 +143,37 @@ sealed class AgentsFlyout : Flyout
             $"{a.RepeatRatio:0%} repeats",
             a.MinsSincePatch is { } m ? $"last patch {m:0} min ago" : null,
         }.Where(s => s is not null)),
+        a.Subagents.Count > 0 ? "subagents: " + string.Join(" · ", a.Subagents.GroupBy(s => s.State).Select(s => $"{s.Count()} {s.Key}")) : null,
     }.Where(s => !string.IsNullOrEmpty(s)));
 
-    /// <summary>Every session that may need a look, then the latest finished ones up to MaxRows; the rest as a count.</summary>
-    (List<AgentSession> Shown, int Hidden) VisibleAgents()
+    /// <summary>
+    /// Every session that may need a look with its running subagents, then the latest finished sessions up to MaxRows;
+    /// the rest as a count.
+    /// </summary>
+    (List<Line> Lines, int Hidden) VisibleLines()
     {
         var all = _agents ?? [];
-        var room = MaxRows - all.Count(a => !a.Done);
-        var shown = all.Where(a => !a.Done || room-- > 0).ToList();
-        return (shown, all.Count - shown.Count);
+        var room = MaxRows - all.Where(a => !a.Done).Sum(a => 1 + Branches(a).Count);
+        var lines = new List<Line>();
+        var hidden = 0;
+        foreach (var a in all)
+        {
+            if (a.Done && room-- <= 0) { hidden++; continue; }
+            lines.Add(new Line(a, Tree.None));
+            lines.AddRange(Branches(a));
+        }
+        return (lines, hidden);
+    }
+
+    /// <summary>A session's running subagents, then how many are done. Nothing while none run.</summary>
+    static List<Line> Branches(AgentSession a)
+    {
+        var running = a.Subagents.Where(s => !s.Done).ToList();
+        if (running.Count == 0) return [];
+        var lines = running.Select(s => new Line(s, Tree.Mid)).ToList();
+        if (a.Subagents.Count > running.Count) lines.Add(new Line(null, Tree.Mid, $"+{a.Subagents.Count - running.Count} done"));
+        lines[^1] = lines[^1] with { Tree = Tree.End };
+        return lines;
     }
 
     int Lines
@@ -144,8 +182,8 @@ sealed class AgentsFlyout : Flyout
         {
             if (_agents is null) return _error is null ? 1 : 2;
             if (_agents.Count == 0) return 1;
-            var (shown, hidden) = VisibleAgents();
-            return shown.Count + (hidden > 0 ? 1 : 0);
+            var (lines, hidden) = VisibleLines();
+            return lines.Count + (hidden > 0 ? 1 : 0);
         }
     }
 
@@ -159,6 +197,7 @@ sealed class AgentsFlyout : Flyout
     {
         var g = e.Graphics;
         g.SmoothingMode = SmoothingMode.AntiAlias;
+        g.InterpolationMode = InterpolationMode.HighQualityBicubic;
 
         using var title = new Font("Segoe UI Semibold", Px(13), GraphicsUnit.Pixel);
         using var small = new Font("Segoe UI", Px(11.5f), GraphicsUnit.Pixel);
@@ -196,16 +235,16 @@ sealed class AgentsFlyout : Flyout
         }
         else
         {
-            var (shown, hidden) = VisibleAgents();
-            foreach (var a in shown)
+            var (lines, hidden) = VisibleLines();
+            foreach (var line in lines)
             {
-                DrawRow(g, a, small, mono, left, right, y);
-                _rows.Add((Rectangle.FromLTRB(0, y, Width, y + rowH), a));
+                DrawLine(g, line, small, mono, left, right, y);
+                if (line.Agent is { } a) _rows.Add((Rectangle.FromLTRB(0, y, Width, y + rowH), a));
                 y += rowH;
             }
             if (hidden > 0)
             {
-                Label(g, $"+{hidden} done", small, Theme.Muted, Rectangle.FromLTRB(left + Px(TagW), y, right, y + rowH));
+                Label(g, $"+{hidden} more done", small, Theme.Muted, Rectangle.FromLTRB(left + Px(TagW), y, right, y + rowH));
                 y += rowH;
             }
         }
@@ -226,12 +265,21 @@ sealed class AgentsFlyout : Flyout
         }
     }
 
-    void DrawRow(Graphics g, AgentSession a, Font small, Font mono, int left, int right, int y)
+    void DrawLine(Graphics g, Line line, Font small, Font mono, int left, int right, int y)
     {
         var rowH = Px(RowH);
         var x = left;
-        Label(g, a.Tool == "codex" ? "cx" : "cl", mono, Theme.Muted, new Rectangle(x, y, Px(TagW), rowH));
+        if (line.Tree != Tree.None) DrawTree(g, line.Tree, x, y);
+        else if (Icons.TryGetValue(line.Agent!.Tool, out var icon))
+            g.DrawImage(icon, new Rectangle(x, y + (rowH - Px(IconW)) / 2, Px(IconW), Px(IconW)));
+        else Label(g, line.Agent.Tool[..Math.Min(2, line.Agent.Tool.Length)], mono, Theme.Muted, new Rectangle(x, y, Px(TagW), rowH));
         x += Px(TagW);
+
+        if (line.Agent is not { } a)
+        {
+            Label(g, line.Note ?? "", small, Theme.Muted, Rectangle.FromLTRB(x, y, right, y + rowH));
+            return;
+        }
 
         var (text, color) = Chip(a);
         var chip = new Rectangle(x, y + Px(3), Px(ChipW), rowH - Px(6));
@@ -245,8 +293,18 @@ sealed class AgentsFlyout : Flyout
         Label(g, a.Project, small, Theme.Text, new Rectangle(x, y, Px(ProjectW), rowH));
         x += Px(ProjectW + 6);
         var tokensX = right - Px(TokensW);
-        Label(g, a.Summary, small, Theme.Muted, Rectangle.FromLTRB(x, y, tokensX - Px(4), y + rowH));
+        Label(g, a.Summary is { Length: > 0 } said ? said : a.Title, small, Theme.Muted, Rectangle.FromLTRB(x, y, tokensX - Px(4), y + rowH));
         Label(g, Tokens(a.TokensPerHour), mono, Theme.Muted, new Rectangle(tokensX, y, Px(TokensW), rowH), right: true);
+    }
+
+    /// <summary>The line from a session's icon down to its subagents, with a branch to this one; it stops here on the last.</summary>
+    void DrawTree(Graphics g, Tree tree, int x, int y)
+    {
+        var rowH = Px(RowH);
+        float cx = x + Px(IconW) / 2f, mid = y + rowH / 2f;
+        using var pen = new Pen(TreeLine, Math.Max(1, Px(1)));
+        g.DrawLine(pen, cx, y - (rowH - Px(IconW)) / 2f, cx, tree == Tree.End ? mid : y + rowH);
+        g.DrawLine(pen, cx, mid, x + Px(TagW) - Px(5), mid);
     }
 
     static (string Text, Color Color) Chip(AgentSession a) => a.Circles ? ("circles", Theme.Hot) : (a.State, a.State switch

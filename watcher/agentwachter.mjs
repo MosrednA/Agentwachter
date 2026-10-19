@@ -5,6 +5,7 @@
 //   node agentwachter.mjs                      serve http://127.0.0.1:17321/agents (JSON) and / (HTML)
 //   node agentwachter.mjs --once               print the JSON once and exit
 //   node agentwachter.mjs --replay <file>      per-hour heuristics for a Codex rollout or Claude transcript
+//   node agentwachter.mjs --demo <file>        serve a fixed snapshot instead of live sessions
 
 import fs from 'node:fs';
 import os from 'node:os';
@@ -81,6 +82,8 @@ class Stats {
   // Claude
   msgIds = new Set();
   pending = new Map();    // tool_use id -> tool event, until its result arrives
+  ended = false;          // subagent: its last record ends its turn (handed back, or interrupted)
+  meta = null;            // subagent: its type and description
   // Codex
   tokenTotal = 0;
   turnOpen = undefined;   // from task_started / task_complete in the rollout
@@ -153,14 +156,16 @@ const round = x => Math.round(x * 100) / 100;
 
 // ---------- Claude Code transcripts ----------
 
-function claudeLine(s, line) {
+/** `sidechain`: the line is from a subagent's own transcript, where every record is a sidechain. */
+function claudeLine(s, line, sidechain = false) {
   let o;
   try { o = JSON.parse(line); } catch { return; }
   const t = Date.parse(o.timestamp);
   const m = o.message;
-  if (!t || o.isSidechain || !m) return;
+  if (!t || (o.isSidechain && !sidechain) || !m) return;
   if (o.type === 'assistant') {
     s.lastAt = Math.max(s.lastAt, t);
+    s.ended = m.stop_reason === 'end_turn' && !(m.content ?? []).some(c => c.type === 'tool_use');
     // One API message is written as several records (one per content block), each repeating its usage.
     if (m.id && !s.msgIds.has(m.id) && m.usage) {
       s.msgIds.add(m.id);
@@ -175,9 +180,12 @@ function claudeLine(s, line) {
       const file = c.input?.file_path ?? c.input?.notebook_path;
       if (EDIT_TOOLS.has(c.name) && file) s.patch(t, [file]);
     }
-  } else if (o.type === 'user' && Array.isArray(m.content)) {
+  } else if (o.type === 'user') {
     s.lastAt = Math.max(s.lastAt, t);
-    for (const c of m.content) {
+    // A subagent hands back with a tool call that ends its turn; a new message resumes it.
+    const text = typeof m.content === 'string' ? m.content : m.content?.find?.(c => c.type === 'text')?.text ?? '';
+    s.ended = !!o.toolEndsTurn || text.startsWith('[Request interrupted');
+    for (const c of Array.isArray(m.content) ? m.content : []) {
       if (c.type !== 'tool_result') continue;
       const e = s.pending.get(c.tool_use_id);
       s.pending.delete(c.tool_use_id);
@@ -349,28 +357,39 @@ function openDb(file) {
 }
 
 /**
- * Recent top-level Codex threads with their last turn, plus every folder Codex has worked in.
- * Short reads; both databases are closed again right away.
+ * Recent top-level Codex threads with their last turn, the agents they spawned that were active in the past hour,
+ * and every folder Codex has worked in. Short reads; both databases are closed again right away.
  */
 function codexThreads(now) {
   let state, history;
   try {
     state = openDb('state_5.sqlite');
-    if (!state) return { threads: [], cwds: [] };
+    if (!state) return { threads: [], subagents: [], cwds: [] };
     history = openDb('thread_history_1.sqlite');
     const top = `source NOT LIKE '{%' AND coalesce(thread_source, '') NOT IN ('subagent', 'guardian_review')`;
     const rows = state.prepare(`
       SELECT id, rollout_path, cwd, title, name, tokens_used, updated_at
       FROM threads WHERE archived = 0 AND updated_at >= ? AND ${top}
       ORDER BY updated_at DESC`).all(Math.floor((now - CODEX_RECENT) / 1000));
+    // Spawned agents only; guardian reviews are approval checks, not work.
+    const spawned = state.prepare(`
+      SELECT id, rollout_path, source, agent_nickname, agent_path
+      FROM threads WHERE archived = 0 AND updated_at >= ? AND source LIKE '{"subagent":{"thread_spawn"%'`)
+      .all(Math.floor((now - ORPHAN) / 1000));
     const cwds = state.prepare(`SELECT DISTINCT cwd FROM threads WHERE ${top}`).all().map(r => r.cwd);
     const turn = history?.prepare(`
       SELECT status, started_at, completed_at FROM thread_turns
       WHERE thread_id = ? ORDER BY started_at DESC, rollout_ordinal DESC LIMIT 1`);
-    return { threads: rows.map(r => ({ ...r, turn: turn?.get(r.id) })), cwds };
+    const subagents = [];
+    for (const r of spawned) {
+      let parent;
+      try { parent = JSON.parse(r.source).subagent.thread_spawn.parent_thread_id; } catch { continue; }
+      if (parent) subagents.push({ ...r, parent, turn: turn?.get(r.id) });
+    }
+    return { threads: rows.map(r => ({ ...r, turn: turn?.get(r.id) })), subagents, cwds };
   } catch (e) {
     console.error('codex:', e.message);
-    return { threads: [], cwds: [] };
+    return { threads: [], subagents: [], cwds: [] };
   } finally {
     state?.close();
     history?.close();
@@ -451,6 +470,65 @@ function mtime(file) {
   try { return fs.statSync(file).mtimeMs; } catch { return 0; }
 }
 
+function readJson(file) {
+  try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return null; }
+}
+
+const subagent = (s, last, state, name, title, now) => ({ name, title, state, summary: s.text, lastActivity: iso(last), ...metrics(s, now) });
+const claudeSidechain = (s, line) => claudeLine(s, line, true);
+
+/**
+ * A Claude session's subagents active in the past hour. Each writes its own transcript next to the session's,
+ * <session>/subagents/agent-<id>.jsonl, with its type and description in agent-<id>.meta.json.
+ */
+function claudeSubagents(file, sessionId, now, keys) {
+  const dir = path.join(path.dirname(file), sessionId, 'subagents');
+  let names;
+  try { names = fs.readdirSync(dir).filter(f => f.endsWith('.jsonl')); } catch { return []; }
+  const out = [];
+  for (const name of names) {
+    const sub = path.join(dir, name);
+    const changed = mtime(sub);
+    if (now - changed > ORPHAN) continue;
+    const key = `claude:${sessionId}:${name}`;
+    keys.add(key);
+    const s = follow(key, sub, claudeSidechain, now);
+    s.meta ??= readJson(sub.replace(/\.jsonl$/, '.meta.json'));
+    const last = Math.max(s.lastAt, changed);
+    const state = s.ended ? 'done' : now - last > QUIET ? 'quiet' : 'busy';
+    out.push(subagent(s, last, state, s.meta?.agentType || 'agent', s.meta?.description ?? '', now));
+  }
+  return out;
+}
+
+/** Codex agents spawned in the past hour, per top-level thread. An agent spawned by an agent counts for the thread at the top. */
+function codexSubagents(rows, now, keys) {
+  const parentOf = new Map(rows.map(r => [r.id, r.parent]));
+  const by = new Map();
+  for (const r of rows) {
+    let top = r.parent;
+    for (let i = 0; i < 10 && parentOf.has(top); i++) top = parentOf.get(top);
+    const file = stripLong(r.rollout_path);
+    const key = `codex:${r.id}`;
+    keys.add(key);
+    const s = follow(key, file, codexLine, now);
+    const last = Math.max(s.lastAt, mtime(file));
+    const open = s.turnOpen ?? r.turn?.status === 'inProgress';
+    const state = !open ? 'done' : s.pendingInput ? 'waiting' : now - last > QUIET ? 'quiet' : 'busy';
+    const role = String(r.agent_path ?? '').split('/').filter(Boolean).at(-1);
+    if (!by.has(top)) by.set(top, []);
+    by.get(top).push(subagent(s, last, state, role || r.agent_nickname || 'agent', r.agent_nickname ?? '', now));
+  }
+  return by;
+}
+
+/** Sorts a session's subagents, running ones first. A done session whose subagents still run isn't done: it resumes when they report. */
+function withSubagents(state, subagents) {
+  subagents.sort((a, b) => (a.state === 'done') - (b.state === 'done') || Date.parse(b.lastActivity) - Date.parse(a.lastActivity));
+  if (state !== 'done') return state;
+  return subagents.some(a => a.state === 'busy') ? 'busy' : subagents.some(a => a.state !== 'done') ? 'quiet' : 'done';
+}
+
 async function refresh() {
   const now = Date.now();
   const procs = await processes();
@@ -460,6 +538,7 @@ async function refresh() {
   try { bridge.read(); } catch (e) { console.error('bridge:', e.message); }
   const claude = claudeSessions(procs);
   const codex = codexThreads(now);
+  const codexSubs = codexSubagents(codex.subagents, now, keys);
 
   for (const j of claude) {
     try {
@@ -468,9 +547,10 @@ async function refresh() {
       keys.add(key);
       const s = file ? follow(key, file, claudeLine, now) : new Stats();
       const last = Math.max(s.lastAt, file ? mtime(file) : 0, j.statusUpdatedAt || 0);
-      const state = j.status === 'waiting' ? 'waiting'
+      const subagents = file ? claudeSubagents(file, j.sessionId, now, keys) : [];
+      const state = withSubagents(j.status === 'waiting' ? 'waiting'
         : j.status === 'busy' ? (now - last > QUIET ? 'quiet' : 'busy')
-        : 'done';
+        : 'done', subagents);
       if (state === 'done' && now - last > DONE_KEEP) continue; // still followed, so it isn't read from the start again
       sessions.push({
         tool: 'claude',
@@ -485,6 +565,7 @@ async function refresh() {
         summary: [state === 'waiting' && j.waitingFor, s.text].filter(Boolean).join(' · '),
         lastActivity: iso(last),
         ...metrics(s, now),
+        subagents,
         bridge: Bridge.summary(bridge.sessions.get(j.sessionId), now),
       });
     } catch (e) {
@@ -500,11 +581,12 @@ async function refresh() {
       const s = follow(key, file, codexLine, now);
       const last = Math.max(s.lastAt, mtime(file));
       const open = s.turnOpen ?? r.turn?.status === 'inProgress';
-      const state = !open ? 'done'
+      const subagents = codexSubs.get(r.id) ?? [];
+      const state = withSubagents(!open ? 'done'
         : s.pendingInput ? 'waiting'
         : codexRunning === false || now - last > ORPHAN ? 'dead'
         : now - last > QUIET ? 'quiet'
-        : 'busy';
+        : 'busy', subagents);
       if (state === 'done' && now - last > DONE_KEEP) continue;
       const since = open ? r.turn?.started_at : r.turn?.completed_at;
       const note = !open && ['failed', 'interrupted'].includes(r.turn?.status) ? r.turn.status : null;
@@ -522,6 +604,7 @@ async function refresh() {
         lastActivity: iso(last),
         ...metrics(s, now),
         tokensTotal: r.tokens_used,
+        subagents,
         bridge: Bridge.summary(bridge.sessions.get(r.id), now),
       });
     } catch (e) {
@@ -589,31 +672,48 @@ const PAGE = `<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Agentwachter</title>
 <style>
-:root{--bg:#1c1d22;--row:#24252b;--text:#ececf0;--muted:#8b8e9a;--ok:#4cc38a;--warn:#f0a43a;--hot:#ef5b52}
+:root{--bg:#1c1d22;--row:#24252b;--line:#3a3c45;--text:#ececf0;--muted:#8b8e9a;--ok:#4cc38a;--warn:#f0a43a;--hot:#ef5b52}
 body{margin:0;padding:16px;background:var(--bg);color:var(--text);font:13px/1.4 "Segoe UI",system-ui,sans-serif}
 h1{font-size:15px;margin:0 0 12px;font-weight:600}h1 span{color:var(--muted);font-weight:400}
 table{border-collapse:collapse;width:100%}td,th{padding:5px 8px;text-align:left;white-space:nowrap}
-th{color:var(--muted);font-weight:400;font-size:12px}tr+tr td{border-top:1px solid var(--row)}
+th{color:var(--muted);font-weight:400;font-size:12px}tr+tr td{border-top:1px solid var(--row)}tr.sub td{border-top:none}
 td.sum{color:var(--muted);max-width:520px;overflow:hidden;text-overflow:ellipsis}td.n{text-align:right;font-family:Consolas,monospace}
+td.tool{width:16px;position:relative}td.tool img{display:block;width:16px;height:16px}
+td.tree::before{content:"";position:absolute;left:15px;top:0;bottom:0;border-left:1px solid var(--line)}
+td.tree.end::before{bottom:50%}td.tree::after{content:"";position:absolute;left:15px;top:50%;width:11px;border-top:1px solid var(--line)}
+tr.sub td.name{color:var(--muted)}.more{color:var(--muted)}
 .chip{display:inline-block;padding:1px 8px;border-radius:9px;font-size:12px;color:#111}
 .busy{background:var(--ok)}.waiting{background:var(--warn)}.quiet,.done{background:var(--muted)}.dead{background:var(--hot)}
 .flag{color:var(--hot);font-weight:600}
 </style></head><body>
 <h1>Agentwachter <span id="upd"></span></h1>
-<table><thead><tr><th></th><th>tool</th><th>project</th><th>session</th><th>latest</th><th>tok/h</th><th>tools/h</th><th>errors</th><th>repeats</th><th>patch</th></tr></thead><tbody id="rows"></tbody></table>
+<table><thead><tr><th></th><th>state</th><th>project</th><th>session</th><th>latest</th><th>tok/h</th><th>tools/h</th><th>errors</th><th>repeats</th><th>patch</th></tr></thead><tbody id="rows"></tbody></table>
 <script>
 const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 const pct = x => x == null ? '' : Math.round(x * 100) + '%';
 const tok = n => n >= 1e6 ? (n / 1e6).toFixed(1) + 'M' : n >= 1e3 ? Math.round(n / 1e3) + 'k' : n || '';
+const row = (a, cls, first, name, title) => '<tr class="' + cls + '">' + first
+  + '<td><span class="chip ' + a.state + '">' + esc(a.state) + '</span>'
+  + (a.circles ? ' <span class="flag" title="busy, mostly repeats, no new files">circles</span>' : '') + '</td>'
+  + '<td class="name">' + esc(name) + '</td><td>' + esc(title) + '</td><td class="sum" title="' + esc(a.summary) + '">' + esc(a.summary) + '</td>'
+  + '<td class="n">' + tok(a.tokensPerHour) + '</td><td class="n">' + (a.toolsPerHour || '') + '</td><td class="n">' + pct(a.errorRate) + '</td>'
+  + '<td class="n">' + pct(a.repeatRatio) + '</td><td class="n">' + (a.minsSincePatch == null ? '' : a.minsSincePatch + 'm') + '</td></tr>';
+// A session, then its running subagents on a tree line, then how many of them are done.
+function rows(s) {
+  const subs = s.subagents ?? [];
+  const running = subs.filter(a => a.state !== 'done');
+  const done = subs.length - running.length;
+  let html = row(s, '', '<td class="tool"><img src="icons/' + s.tool + '.png" alt="' + s.tool + '" title="' + s.tool + '"></td>', s.project, s.title);
+  if (!running.length) return html;
+  html += running.map((a, i) => row(a, 'sub', '<td class="tool tree' + (i === running.length - 1 && !done ? ' end' : '') + '"></td>', a.name, a.title)).join('');
+  if (done) html += '<tr class="sub"><td class="tool tree end"></td><td class="more" colspan="9">+' + done + ' done</td></tr>';
+  return html;
+}
 async function load() {
   try {
     const d = await (await fetch('agents')).json();
     document.getElementById('upd').textContent = new Date(d.updated).toLocaleTimeString();
-    document.getElementById('rows').innerHTML = d.sessions.map(s => '<tr><td><span class="chip ' + s.state + '">' + esc(s.state) + '</span>'
-      + (s.circles ? ' <span class="flag" title="busy, mostly repeats, no new files">circles</span>' : '') + '</td>'
-      + '<td>' + s.tool + '</td><td>' + esc(s.project) + '</td><td>' + esc(s.title) + '</td><td class="sum" title="' + esc(s.summary) + '">' + esc(s.summary) + '</td>'
-      + '<td class="n">' + tok(s.tokensPerHour) + '</td><td class="n">' + (s.toolsPerHour || '') + '</td><td class="n">' + pct(s.errorRate) + '</td>'
-      + '<td class="n">' + pct(s.repeatRatio) + '</td><td class="n">' + (s.minsSincePatch == null ? '' : s.minsSincePatch + 'm') + '</td></tr>').join('');
+    document.getElementById('rows').innerHTML = d.sessions.map(rows).join('');
   } catch { document.getElementById('upd').textContent = 'not reachable'; }
 }
 load(); setInterval(load, 30000);
@@ -629,6 +729,12 @@ function serve() {
     } else if (url === '/') {
       res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
       res.end(PAGE);
+    } else if (/^\/icons\/(claude|codex)\.png$/.test(url)) {
+      fs.readFile(path.join(import.meta.dirname, url), (err, png) => {
+        if (err) return res.writeHead(404).end();
+        res.writeHead(200, { 'content-type': 'image/png', 'cache-control': 'max-age=86400' });
+        res.end(png);
+      });
     } else {
       res.writeHead(404).end();
     }
@@ -657,6 +763,11 @@ if (!import.meta.main) {
 } else if (args[0] === '--once') {
   await refresh();
   console.log(JSON.stringify(snapshot, null, 1));
+} else if (args[0] === '--demo') {
+  // A fixed snapshot instead of live sessions: for screenshots, or for working on the page and the tray.
+  snapshot = readJson(stripLong(args[1] ?? ''));
+  if (!snapshot?.updated) { console.error('usage: node agentwachter.mjs --demo <snapshot.json>'); process.exit(2); }
+  serve();
 } else {
   serve();
   loop();

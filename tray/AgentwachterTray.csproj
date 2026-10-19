@@ -17,4 +17,9 @@
     <Description>Running Claude Code and Codex sessions at a glance, in the Windows system tray.</Description>
   </PropertyGroup>
 
+  <ItemGroup>
+    <!-- The same icons the watcher's page uses: claude.png, codex.png. -->
+    <EmbeddedResource Include="..\watcher\icons\*.png" LogicalName="%(Filename).png" />
+  </ItemGroup>
+
 </Project>
