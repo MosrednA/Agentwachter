@@ -165,7 +165,7 @@ The test run took ~23.5 h, with 232.6M tokens and 1461 tool calls.
 - **Circles flag:** it lit for 10 minutes, 04:06–04:15 on Oct 16. That is the tail of a stretch where Codex slept and re-ran the same status check. Over that stretch, 51–70% of calls were repeats, 0–1 files were new, and the last patch was 26 to 66 minutes old.
 - **The rest of the run** looks like normal work. Repeats stay at or below 15%, and most active hours touch 4–32 new files, in line with large Claude runs.
 - **False alarms:** none. The flag never fires on the 16 largest Claude transcripts or on a 71-hour Codex run.
-- **What it misses:** the quality metric drifted from 1189 to 1165, and activity signals can't show that. That is phase 2.
+- **What it misses:** the quality metric drifted from 1189 to 1165, and activity signals can't show that.
 
 </details>
 
@@ -210,15 +210,6 @@ Stop-Process $demo
 
 ## Roadmap
 
-- **Phase 2: a judge.** A small decision model reads each session's recent messages and answers "how is this agent doing?". Its choices are *making progress*, *going in circles*, *waiting for you*, *stuck* or *done*. On five real mossub moments:
-
-  | Judge | Score | Speed |
-  |---|---|---|
-  | Jev (`jev-latest`, TypeSafe API) | 5/5 | 0.2–0.3 s |
-  | Gemma 4 E4B, local via Unsloth Studio | 4/5 | 0.1 s |
-  | Kev 0.8B, local via Unsloth's `/v1/systemone` | ~2/5 | 3–7 s on CPU |
-
-  The plan is to make the judge a URL plus a model in the Jev request format. That means Jev for now, and a local model through Unsloth once a stronger one holds up on the same five moments. The yes/no question "does the owner need to know now?" was useless for every model, so notifications come from the state and how long it lasts.
 - **New Codex projects from `start`.** A folder `start` trusted still isn't a project in the Codex sidebar. The app-server's `project/create` didn't reach the running app.
 
 ## Merging into UsageTray
